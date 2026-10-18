@@ -1,0 +1,10 @@
+﻿# dsh-memory bundle patch
+#
+# 只插入宿主半区一个插件行。浏览器半区由 package.json 的 dsh.client 字段
+# 声明，DSH 会自行加载 exports["./client"]，不需要在这里再写一行。
+#
+# 服务的依赖声明写在 lib/index.js 的 `export const inject` 里，不放在这里：
+# cordis 只认插件导出的 inject，patch 里的同名字段不会参与调度。
+- insert:
+    - id: dsh-memory
+      name: dsh-memory

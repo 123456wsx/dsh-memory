@@ -1,0 +1,13 @@
+# 依赖
+node_modules/
+
+# 日志与临时文件
+*.log
+
+# 本插件的记忆数据与调试打点（storeDir 若指到仓库内，别提交）
+memory/
+*.tmp
+
+# 系统生成
+.DS_Store
+Thumbs.db
