@@ -15,9 +15,10 @@ DSH 的会话上下文是单次的 —— 新开会话，它不记得你们上�
 
 | | |
 |---|---|
-| 🧠 五工具 | `memory_write` / `memory_search` / `memory_list` / `memory_forget` / `memory_pin` |
-| 🪄 自动注入 | 走 `ctx.systemPrompt.section`，每次请求自带记忆摘要（可调预算，也可关闭） |
-| ✍️ 可视化编辑 | 设置 → 记忆：搜索、新增、行内编辑、置顶、删除 |
+| 🧠 六工具 | `memory_write` / `memory_diary` / `memory_search` / `memory_list` / `memory_forget` / `memory_pin` |
+| 🐋 两档记忆 | 「我们之间」由你掌管；「本鱼的记忆」是模型自己的，面板里**只能看不能改** |
+| 🪄 自动注入 | 走 `ctx.systemPrompt.section`，每次请求自带两段摘要（各自预算，也可单独关掉） |
+| ✍️ 可视化编辑 | 设置 → 记忆：按归属分页、搜索、新增、行内编辑、置顶、删除 |
 | 📒 纯文本存储 | `$DSH_HOME/memory/memories.jsonl`，能记事本打开、能进 git、坏行能救 |
 | 🚫 无隐形淘汰 | 写满 `maxItems` 就拒写并提示清理，绝不偷偷删你的记忆 |
 | 🔒 纯本地 | 不发起任何网络请求；HTTP 只挂在 DSH 自己的 localhost 上 |
@@ -71,14 +72,34 @@ New-Item -ItemType Junction `
 
 它就会调用 `memory_write` 写一条。下次新开会话，这条会出现在系统提示词的「长期记忆」段里。
 
+模型也会自己写日记（`memory_diary`）：那是它自己的那一档，落在「本鱼的记忆」里，
+你只能看、不能改 —— 要不要写、写什么，由它自己判断。
+
 ### 人侧
 
 设置 → 记忆：
 
 - 顶部开关：暂停 / 恢复（暂停 = 不注入、工具拒写，已存条目不动）
-- 用量条：`N / maxItems`，满了会变红并提示删除
+- 用量条：`N / maxItems`，两档共用这一个上限
+- 三个分页：**全部** / **我们之间** / **本鱼的记忆**（带各自条数）
 - 搜索框：标题、正文、标签都能搜；可按作用域、类型筛
-- 每条：置顶 / 编辑 / 删除（删除前自动快照到 `.bak`）
+- 「我们之间」的每条：置顶 / 编辑 / 删除（删除前自动快照到 `.bak`）
+- 「本鱼的记忆」的每条：只有 📌 和正文，标着「只读」；日记按天分组成时间线
+- 「导出本鱼的记忆」：把那一段导成 JSON 存着（换机器时能拿回来）
+
+### 两档记忆
+
+| 归属 | 谁写的 | 谁能改 | 存在哪 |
+|---|---|---|---|
+| `user`「我们之间」 | 你和模型 | 你 + 模型 | 同一个 `memories.jsonl` |
+| `self`「本鱼的记忆」 | 只有模型 | **只有模型** | 同一个 `memories.jsonl`（`subject: "self"`） |
+
+`self` 那一档的只读是**服务端强制**的：`/api/upsert`、`/api/delete`、`/api/pin`
+碰到 `self` 条目一律返回 403 —— 不是把按钮灰一下那么简单，绕开前端也改不动。
+模型侧走工具（`memory_diary`、`memory_write` 的 `subject: "self"`），读写删改都随它。
+
+两档各自渲染、各自预算，所以你自己那条「称呼偏好」不会被模型自己的同名条目顶掉。
+老版本写下的条目没有 `subject` 字段，读回来一律算 `user`，不用迁移。
 
 ---
 
@@ -90,7 +111,8 @@ New-Item -ItemType Junction `
 |---|---|---|
 | `enabled` | `true` | 总开关 |
 | `storeDir` | `$DSH_HOME/memory` | 存储目录 |
-| `promptBudget` | `1500` | 每次注入的字符预算；`0` = 关闭自动注入 |
+| `promptBudget` | `1500` | 「我们之间」那段的字符预算；`0` = 不注入 |
+| `selfBudget` | `600` | 「本鱼的记忆」那段的字符预算；`0` = 不注入（记忆照常保存） |
 | `maxItems` | `5000` | 条数硬上限，写满即拒写 |
 | `scopes` | `["global","workspace"]` | 启用哪些作用域 |
 | `exposePanel` | `true` | 是否开放 `/__dsh-memory/` 调试单页 |
@@ -104,6 +126,7 @@ New-Item -ItemType Junction `
   name: dsh-memory
   config:
     promptBudget: 1200
+    selfBudget: 500
     maxItems: 3000
 ```
 
@@ -135,12 +158,12 @@ $DSH_HOME/memory/
 ## 开发
 
 ```bash
-node --test test/store.test.mjs test/host.test.mjs
+node --test            # 自动发现 test/*.test.mjs
 ```
 
-`test/store.test.mjs` 是存储层单元测试（12 项），
+`test/store.test.mjs` 是存储层单元测试（16 项），
 `test/host.test.mjs` 用一个仿造的 cordis ctx 跑通
-`apply → 工具注册 → 工具执行 → 提示词注入 → HTTP 路由`（11 项）。
+`apply → 工具注册 → 工具执行 → 提示词注入 → HTTP 路由`（14 项）。
 
 ---
 

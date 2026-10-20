@@ -81,7 +81,7 @@ function setup(config = {}) {
   return { dir, ctx, registered, runtime, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
 }
 
-test('apply 注册了五个工具、一个注入段、十条路由', () => {
+test('apply 注册了六个工具、一个注入段、十条路由', () => {
   const { registered, runtime, cleanup } = setup()
   try {
     assert.equal(runtime.degraded, false)
@@ -89,6 +89,7 @@ test('apply 注册了五个工具、一个注入段、十条路由', () => {
 
     const names = registered.tools.map((tool) => tool.name).sort()
     assert.deepEqual(names, [
+      'memory_diary',
       'memory_forget',
       'memory_list',
       'memory_pin',
@@ -270,6 +271,54 @@ test('注入段在没有任何记忆时返回空串', () => {
   }
 })
 
+test('memory_diary 写进「本鱼的记忆」，两段各归各的', async () => {
+  const { registered, runtime, cleanup } = setup()
+  try {
+    const write = registered.tools.find((tool) => tool.name === 'memory_write')
+    const diary = registered.tools.find((tool) => tool.name === 'memory_diary')
+    await write.execute({ title: '称呼偏好', text: '叫船长' }, {})
+
+    const result = await diary.execute(
+      { title: '给记忆加归属轴', text: '今天把两档拆开了，尾鳍都晃起来了', mood: '得意' },
+      {},
+    )
+    assert.equal(result.ok, true)
+    assert.equal(result.subject, 'self')
+
+    const block = registered.sections[0].text()
+    assert.match(block, /长期记忆/)
+    assert.match(block, /本鱼的记忆/)
+    // 用户段不该混进日记，日记也不该被当成用户数据
+    const userPart = block.split('## 本鱼的记忆')[0]
+    const selfPart = block.split('## 本鱼的记忆')[1]
+    assert.doesNotMatch(userPart, /尾鳍/)
+    assert.match(selfPart, /尾鳍/)
+    assert.doesNotMatch(selfPart, /称呼偏好/)
+
+    // mood 落成标签，日记的 kind 也存对了
+    const list = registered.tools.find((tool) => tool.name === 'memory_list')
+    const listed = await list.execute({ subject: 'self' }, {})
+    assert.equal(listed.ok, true)
+    const saved = runtime.store.get(result.id)
+    assert.equal(saved.kind, 'diary')
+    assert.equal(saved.subject, 'self')
+    assert.ok(saved.tags.includes('得意'))
+  } finally {
+    cleanup()
+  }
+})
+
+test('selfBudget = 0 时不注入「本鱼的记忆」这一段', async () => {
+  const { registered, cleanup } = setup({ selfBudget: 0 })
+  try {
+    const diary = registered.tools.find((tool) => tool.name === 'memory_diary')
+    await diary.execute({ title: '只写给自己', text: '不给你看' }, {})
+    assert.doesNotMatch(registered.sections[0].text(), /本鱼的记忆/)
+  } finally {
+    cleanup()
+  }
+})
+
 test('注入段不含易变内容（稳定性检查）', async () => {
   const { registered, cleanup } = setup()
   try {
@@ -280,6 +329,68 @@ test('注入段不含易变内容（稳定性检查）', async () => {
     assert.equal(first, second, '同样数据两次渲染必须完全一致')
     assert.doesNotMatch(first, /\d{4}-\d{2}-\d{2}/, '不能出现日期')
     assert.doesNotMatch(first, /\d+\s*秒前|\d+\s*分钟前/, '不能出现相对时间')
+  } finally {
+    cleanup()
+  }
+})
+
+test('HTTP：本鱼的记忆对人只读（upsert / delete / pin 一律 403）', async () => {
+  const { registered, runtime, cleanup } = setup()
+  try {
+    const diary = registered.tools.find((tool) => tool.name === 'memory_diary')
+    const write = registered.tools.find((tool) => tool.name === 'memory_write')
+    const mine = await diary.execute({ title: '本鱼的日记', text: '只有我自己能改' }, {})
+    await write.execute({ title: '我们的约定', text: '一起的事' }, {})
+
+    const post = async (path, body) => {
+      const handler = registered.routes.find((route) => route.path === path).handler
+      const req = makeReq({
+        method: 'POST',
+        url: path,
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+      const res = makeRes()
+      const task = handler(req, res)
+      req.flush()
+      await task
+      return res
+    }
+
+    // 新建时宣称要写进 self：拒
+    const create = await post('/__dsh-memory/api/upsert', {
+      title: '冒充',
+      text: '想替你写记忆',
+      subject: 'self',
+    })
+    assert.equal(create.status, 403)
+
+    // 拿着 id 去改 / 删 / 置顶：同样拒
+    assert.equal((await post('/__dsh-memory/api/upsert', { id: mine.id, title: '改掉' })).status, 403)
+    assert.equal((await post('/__dsh-memory/api/delete', { id: mine.id })).status, 403)
+    assert.equal((await post('/__dsh-memory/api/pin', { id: mine.id, pinned: true })).status, 403)
+
+    // 「我们之间」的条目照常能改
+    const ok = await post('/__dsh-memory/api/upsert', { title: '我们的约定', text: '一起的事，改一下' })
+    assert.equal(ok.status, 200)
+
+    // 但看得到 —— 列表按归属过滤
+    const list = registered.routes.find((route) => route.path === '/__dsh-memory/api/list').handler
+    const selfRes = makeRes()
+    await list(makeReq({ url: '/__dsh-memory/api/list?subject=self' }), selfRes)
+    const selfPayload = JSON.parse(selfRes.body)
+    assert.equal(selfPayload.total, 1)
+    assert.equal(selfPayload.items[0].id, mine.id)
+
+    const userRes = makeRes()
+    await list(makeReq({ url: '/__dsh-memory/api/list?subject=user' }), userRes)
+    assert.equal(JSON.parse(userRes.body).total, 1)
+
+    // 导出本鱼的记忆：只有那一条
+    const exported = runtime.store.exportAll({ subject: 'self' })
+    assert.equal(exported.length, 1)
+    assert.equal(exported[0].subject, 'self')
+    assert.equal(runtime.store.stats().bySubject.self, 1)
   } finally {
     cleanup()
   }

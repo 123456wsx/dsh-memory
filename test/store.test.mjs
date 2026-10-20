@@ -7,7 +7,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync, appendFileSync, exist
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { MemoryStore, STORE_FILE, BACKUP_FILE, similarity, normalizeScope, normalizeTags } from '../lib/store.js'
+import { MemoryStore, STORE_FILE, BACKUP_FILE, similarity, normalizeScope, normalizeTags, normalizeSubject } from '../lib/store.js'
 
 function freshStore(options = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'dsh-memory-'))
@@ -207,4 +207,90 @@ test('工具函数：作用域归一化与标签清理', () => {
   assert.deepEqual(normalizeTags(['a', 'a', 'b']), ['a', 'b'])
   assert.ok(similarity('称呼偏好', '称呼偏好') === 1)
   assert.ok(similarity('称呼偏好', '项目背景') < 0.3)
+})
+
+test('工具函数：归属归一化，缺省算 user（向后兼容老条目）', () => {
+  assert.equal(normalizeSubject(undefined), 'user')
+  assert.equal(normalizeSubject(''), 'user')
+  assert.equal(normalizeSubject('self'), 'self')
+  assert.equal(normalizeSubject('SELF'), 'self')
+  assert.equal(normalizeSubject('user'), 'user')
+  assert.equal(normalizeSubject('乱七八糟'), 'user')
+})
+
+test('两档记忆：同标题不会互相吞掉，各自成条', () => {
+  const { store, cleanup } = freshStore()
+  try {
+    const mine = store.upsert({ title: '称呼偏好', text: '喜欢被叫船长', subject: 'self' })
+    assert.equal(mine.ok, true)
+    assert.equal(mine.action, 'created')
+    assert.equal(mine.item.subject, 'self')
+
+    const yours = store.upsert({ title: '称呼偏好', text: '用户希望被称呼为「船长」' })
+    assert.equal(yours.action, 'created', 'user 那一档要独立成条，不能被 self 吞掉')
+    assert.equal(store.items.size, 2)
+
+    // 同一档里再写一次，才算更新
+    const again = store.upsert({ title: '称呼偏好', text: '喜欢被叫船长呀', subject: 'self' })
+    assert.equal(again.action, 'updated')
+    assert.equal(again.item.id, mine.item.id)
+    assert.equal(store.items.size, 2)
+
+    // 老条目没有 subject 字段：读回来算 user
+    const legacy = store.upsert({ title: '老条目', text: '没有归属字段' })
+    assert.equal(legacy.item.subject, 'user')
+  } finally {
+    cleanup()
+  }
+})
+
+test('按归属筛选：list / stats / exportAll 都分得清', () => {
+  const { store, cleanup } = freshStore()
+  try {
+    store.upsert({ title: '船长偏好', text: '叫船长' })
+    store.upsert({ title: '日记一', text: '今天很高兴', kind: 'diary', subject: 'self' })
+    store.upsert({ title: '日记二', text: '又写了一天', kind: 'diary', subject: 'self' })
+
+    assert.equal(store.list({ subject: 'user' }).total, 1)
+    assert.equal(store.list({ subject: 'self' }).total, 2)
+    assert.equal(store.list({}).total, 3, '不传 subject = 全都要')
+    assert.equal(store.list({ subject: 'self', kind: 'diary' }).total, 2)
+
+    const stats = store.stats()
+    assert.deepEqual(stats.bySubject, { user: 1, self: 2 })
+    assert.equal(stats.byKind.diary, 2, 'diary 是合法类型')
+
+    assert.equal(store.exportAll({ subject: 'self' }).length, 2)
+    assert.equal(store.exportAll({ subject: 'user' }).length, 1)
+    assert.equal(store.exportAll().length, 3)
+
+    // 检索也能按归属收窄
+    assert.equal(store.search({ q: '日记', subject: 'self' }).items.length, 2)
+    assert.equal(store.search({ q: '船长', subject: 'self' }).items.length, 0)
+  } finally {
+    cleanup()
+  }
+})
+
+test('导入导出往返：subject 不丢', () => {
+  const { store, cleanup } = freshStore()
+  try {
+    store.upsert({ title: '日记一篇', text: '本鱼写的', kind: 'diary', subject: 'self' })
+    store.upsert({ title: '约定', text: '我们一起的' })
+    const dump = store.exportAll()
+
+    const { store: other, cleanup: cleanupOther } = freshStore()
+    try {
+      const result = other.importAll(dump, { mode: 'merge' })
+      assert.equal(result.ok, true)
+      assert.equal(result.added, 2)
+      assert.equal(other.list({ subject: 'self' }).total, 1)
+      assert.equal(other.list({ subject: 'user' }).total, 1)
+      assert.equal(other.list({ subject: 'self' }).items[0].kind, 'diary')
+    } finally {
+      cleanupOther()
+    }
+  } finally {
+    cleanup()
+  }
 })
